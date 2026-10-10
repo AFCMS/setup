@@ -7,6 +7,8 @@ import util from 'util'
 import { parse as parseYaml } from 'yaml'
 import { Inputs } from '../inputs'
 import { downloadPnpm, resolvePnpm } from './download'
+import { readLockedPnpmVersion } from './locked-version'
+import { packageManagerLockfileDirectory, packageManagerManifest } from './project'
 
 export interface SelfInstallerResult {
   binDest: string
@@ -16,8 +18,20 @@ export interface SelfInstallerResult {
 export async function runSelfInstaller(inputs: Inputs): Promise<SelfInstallerResult> {
   const { version, dest, packageJsonFile } = inputs
 
-  const spec = readTargetVersion({ version, packageJsonFile })
-  const resolved = await resolvePnpm(spec)
+  const checkout = process.env.GITHUB_WORKSPACE
+  const manifest = checkout
+    ? version
+      ? path.resolve(checkout, packageJsonFile)
+      : selectPackageManagerManifest(path.resolve(checkout, packageJsonFile), checkout)
+    : undefined
+  const spec = readTargetVersion({ version, packageJsonFile: manifest ?? packageJsonFile })
+  const lockfileDirectory = !version && manifest && checkout
+    ? packageManagerLockfileDirectory(path.resolve(checkout, packageJsonFile), manifest)
+    : undefined
+  const lockedVersion = lockfileDirectory
+    ? readLockedPnpmVersion(lockfileDirectory, spec)
+    : undefined
+  const resolved = await resolvePnpm(lockedVersion ?? spec)
   info(`Downloading pnpm ${resolved.version} from the npm registry`)
 
   await rm(dest, { recursive: true, force: true })
@@ -45,29 +59,47 @@ export async function runSelfInstaller(inputs: Inputs): Promise<SelfInstallerRes
   return { binDest: dest, pnpmHome: dest }
 }
 
+/**
+ * A workspace root that declares no pnpm version leaves the member's own
+ * declaration in charge, as it was before members inherited from the root.
+ */
+function selectPackageManagerManifest(projectManifest: string, checkout: string): string {
+  const rootManifest = packageManagerManifest(projectManifest, checkout)
+  if (rootManifest === projectManifest) return rootManifest
+  const { packageManager, devEngines } = readPnpmDeclaration(rootManifest)
+  const declaresPnpm = (devEngines?.packageManager?.name === 'pnpm' && Boolean(devEngines.packageManager.version)) ||
+    (typeof packageManager === 'string' && packageManager.startsWith('pnpm@'))
+  return declaresPnpm ? rootManifest : projectManifest
+}
+
+interface PnpmDeclaration {
+  readonly packageManager?: string
+  readonly devEngines?: { packageManager?: { name?: string; version?: string } }
+}
+
+function readPnpmDeclaration(packageJsonFile: string): PnpmDeclaration {
+  const { GITHUB_WORKSPACE } = process.env
+  if (!GITHUB_WORKSPACE) return {}
+  try {
+    const content = readFileSync(path.resolve(GITHUB_WORKSPACE, packageJsonFile), 'utf8');
+    const manifest = packageJsonFile.endsWith('.yaml')
+      ? parseYaml(content, { merge: true })
+      : JSON.parse(content)
+    return { packageManager: manifest.packageManager, devEngines: manifest.devEngines }
+  } catch (error: unknown) {
+    // Swallow error if package.json doesn't exist in root
+    if (!util.types.isNativeError(error) || !('code' in error) || error.code !== 'ENOENT') throw error
+    return {}
+  }
+}
+
 function readTargetVersion(opts: {
   readonly version?: string | undefined
   readonly packageJsonFile: string
 }): string {
   const { version, packageJsonFile } = opts
   const { GITHUB_WORKSPACE } = process.env
-
-  let packageManager: string | undefined
-  let devEngines: { packageManager?: { name?: string; version?: string } } | undefined
-
-  if (GITHUB_WORKSPACE) {
-    try {
-      const content = readFileSync(path.resolve(GITHUB_WORKSPACE, packageJsonFile), 'utf8');
-      const manifest = packageJsonFile.endsWith('.yaml')
-        ? parseYaml(content, { merge: true })
-        : JSON.parse(content)
-      packageManager = manifest.packageManager
-      devEngines = manifest.devEngines
-    } catch (error: unknown) {
-      // Swallow error if package.json doesn't exist in root
-      if (!util.types.isNativeError(error) || !('code' in error) || error.code !== 'ENOENT') throw error
-    }
-  }
+  const { packageManager, devEngines } = readPnpmDeclaration(packageJsonFile)
 
   // packageManager is always exact `pnpm@<version>[+<integrity>]` per spec.
   // Strip the integrity hash before resolving.
@@ -114,7 +146,10 @@ Please specify it by one of the following ways:
 
 function readVersion(pnpmBin: string): Promise<string> {
   return new Promise<string>((resolve, reject) => {
-    const cp = spawn(pnpmBin, ['--version'], { stdio: ['ignore', 'pipe', 'inherit'] })
+    // Check the downloaded binary itself, not a version selected by the project.
+    const cp = spawn(pnpmBin, ['--config.pm-on-fail=ignore', '--version'], {
+      stdio: ['ignore', 'pipe', 'inherit'],
+    })
     let output = ''
     cp.stdout.on('data', (chunk) => { output += chunk })
     cp.on('error', reject)
