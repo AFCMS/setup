@@ -14,6 +14,19 @@ inputs:
       When omitted, the version is read from `devEngines.packageManager` or
       `packageManager` in the project's package.json.
     required: false
+  registry:
+    description: |
+      npm registry to resolve and download pnpm from, e.g. a mirror on a
+      network that cannot reach registry.npmjs.org. Defaults to
+      `https://registry.npmjs.org/`; registry environment variables such as
+      `pnpm_config_registry` do not change it.
+
+      The mirror has to proxy the npm registry rather than re-publish pnpm:
+      the download is verified against npm's own signature, which it must
+      pass through unchanged. This only affects how pnpm itself is fetched —
+      configure pnpm's own `registry` setting, e.g. `pnpm_config_registry`,
+      for `pnpm install`.
+    required: false
   dest:
     description: Where to store pnpm files
     required: false

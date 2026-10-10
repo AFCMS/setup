@@ -22,6 +22,7 @@ Only one version of each runtime can be installed globally. If a runtime name is
 | Name | Description |
 |------|-------------|
 | `version` | Version of pnpm to install: an exact version, a semver range (`^12.0.0`), or a dist-tag (`next-12`). Must resolve to v11 or newer. Optional when `packageManager` or `devEngines.packageManager` is set in `package.json`. |
+| `registry` | npm registry to resolve and download pnpm from, e.g. a mirror. Defaults to `https://registry.npmjs.org/`. See [Registry mirrors](#registry-mirrors). |
 | `dest` | Where to store pnpm files. Defaults to `~/setup-pnpm`. |
 | `runtime` | Runtime spec, in `<name>` or `<name>@<version>` form (e.g. `node@22`, `node@lts`, `bun@latest`, `deno@2`). Supported names: `node`, `bun`, `deno`. When the version is omitted, falls back to `devEngines.runtime`, then to `lts` (for `node`) / `latest`. Node.js also supports version files with the precedence described below. If the input itself is omitted, installs every entry in `devEngines.runtime` and adds Node.js when a version file supplies it. |
 | `node-version-file` | Optional Node.js version file path, relative to `working-directory`. By default, checks `.node-version`, `.nvmrc`, then `.tool-versions` when the manifest does not declare Node.js. Set to `false` to disable file detection. An explicit path overrides the manifest; an explicit version in `runtime` overrides both. |
@@ -300,6 +301,35 @@ versions, and the job did not change it, the save is skipped because it would
 only duplicate that entry. So a matrix with a warm cache saves nothing. A job
 that adds to the store, for example after restoring an incomplete entry,
 still saves it.
+
+### Registry mirrors
+
+On runners that cannot reach `registry.npmjs.org`, point the action at a mirror
+that proxies it — Artifactory, Nexus, Verdaccio and the like. The `registry`
+input sets where pnpm itself is downloaded from; `pnpm_config_registry` sets the
+registry for every pnpm command after it, including the action's own
+`pnpm install`. A mirror-only network needs both:
+
+```yaml
+jobs:
+  build:
+    env:
+      pnpm_config_registry: https://artifactory.example.com/api/npm/npm-remote/
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/setup@v3
+        with:
+          registry: https://artifactory.example.com/api/npm/npm-remote/
+```
+
+Registry environment variables never change where pnpm is downloaded from, so
+a workflow that points `pnpm_config_registry` at a registry needing a token
+keeps downloading pnpm from npm.
+
+The mirror must serve npm's package metadata unchanged: the action verifies
+the pnpm download against npm's own signature, so a registry that re-publishes
+pnpm under its own signature, or strips it, is refused. Registries that need a
+token to read pnpm are not supported yet.
 
 ### Private registries
 
