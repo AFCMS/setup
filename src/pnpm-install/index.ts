@@ -1,22 +1,14 @@
-import { info, setFailed, startGroup, endGroup } from '@actions/core'
-import { spawnSync } from 'child_process'
-import { existsSync } from 'fs'
-import path from 'path'
-import { Inputs } from '../inputs'
-import { lockfileDir } from './lockfile'
+import { spawnSync, type SpawnSyncReturns } from 'node:child_process'
+import { existsSync } from 'node:fs'
+import path from 'node:path'
 
-export function runPnpmInstall(inputs: Inputs, runtimeInstalled = Boolean(inputs.runtime)) {
-  const args = ['install']
-  if (inputs.requireLockfile) {
-    args.push('--frozen-lockfile')
-  }
+import { endGroup, info, setFailed, startGroup } from '@actions/core'
 
-  // The requested runtimes were already installed via `pnpm runtime set`.
-  // Prevent `pnpm install` from processing devEngines.runtime again.
-  if (runtimeInstalled) {
-    args.push('--no-runtime')
-  }
+import { Inputs } from '../inputs/index.js'
+import { lockfileDir } from './lockfile.js'
 
+export function runPnpmInstall (inputs: Inputs, runtimeInstalled = Boolean(inputs.runtime)): void {
+  const args = installArgs(inputs, runtimeInstalled)
   // Every message below quotes this, so it has to name the command actually
   // run, flags included.
   const command = `pnpm ${args.join(' ')}`
@@ -29,39 +21,56 @@ export function runPnpmInstall(inputs: Inputs, runtimeInstalled = Boolean(inputs
     info(`GITHUB_WORKSPACE is not set; skipping \`${command}\`.`)
     return
   }
-  const manifestPath = path.resolve(GITHUB_WORKSPACE, inputs.packageJsonFile)
-  if (!existsSync(manifestPath)) {
+  if (!existsSync(path.resolve(GITHUB_WORKSPACE, inputs.packageJsonFile))) {
     info(`No ${inputs.packageJsonFile} found in workspace; skipping \`${command}\`.`)
     return
   }
 
   const workingDirectory = path.resolve(GITHUB_WORKSPACE, inputs.workingDirectory)
   const pnpmBin = path.join(inputs.dest, process.platform === 'win32' ? 'pnpm.exe' : 'pnpm')
-
-  // Answer this before running anything: a missing lockfile is the whole
-  // reason `require-lockfile` exists, and pnpm's own error for it arrives
-  // after an install that was never going to succeed.
-  if (inputs.requireLockfile) {
-    const lockfileDirectory = lockfileDir(workingDirectory, pnpmBin)
-    if (!existsSync(path.join(lockfileDirectory, 'pnpm-lock.yaml'))) {
-      const searched = path.relative(GITHUB_WORKSPACE, lockfileDirectory) || '.'
-      setFailed(
-        '`require-lockfile` is set but no pnpm-lock.yaml was found in ' +
-        `${searched}, which is where an install in ${inputs.workingDirectory} ` +
-        'reads one. Commit the lockfile, or unset `require-lockfile` to let ' +
-        'pnpm resolve and write one.',
-      )
-      return
-    }
-  }
+  if (inputs.requireLockfile && !hasRequiredLockfile(inputs, GITHUB_WORKSPACE, workingDirectory, pnpmBin)) return
 
   startGroup(`Running ${command}...`)
-  const { error, status, signal } = spawnSync(pnpmBin, args, {
+  const result = spawnSync(pnpmBin, args, {
     stdio: 'inherit',
     cwd: workingDirectory,
   })
   endGroup()
+  reportInstallResult(command, result)
+}
 
+function installArgs (inputs: Inputs, runtimeInstalled: boolean): string[] {
+  const args = ['install']
+  if (inputs.requireLockfile) {
+    args.push('--frozen-lockfile')
+  }
+  // The requested runtimes were already installed via `pnpm runtime set`.
+  // Prevent `pnpm install` from processing devEngines.runtime again.
+  if (runtimeInstalled) {
+    args.push('--no-runtime')
+  }
+  return args
+}
+
+/**
+ * Answered before running anything: a missing lockfile is the whole reason
+ * `require-lockfile` exists, and pnpm's own error for it arrives after an
+ * install that was never going to succeed.
+ */
+function hasRequiredLockfile (inputs: Inputs, workspace: string, workingDirectory: string, pnpmBin: string): boolean {
+  const lockfileDirectory = lockfileDir(workingDirectory, pnpmBin)
+  if (existsSync(path.join(lockfileDirectory, 'pnpm-lock.yaml'))) return true
+  const searched = path.relative(workspace, lockfileDirectory) || '.'
+  setFailed(
+    '`require-lockfile` is set but no pnpm-lock.yaml was found in ' +
+    `${searched}, which is where an install in ${inputs.workingDirectory} ` +
+    'reads one. Commit the lockfile, or unset `require-lockfile` to let ' +
+    'pnpm resolve and write one.'
+  )
+  return false
+}
+
+function reportInstallResult (command: string, { error, status, signal }: SpawnSyncReturns<Buffer>): void {
   if (error) {
     setFailed(error)
     return
@@ -76,5 +85,3 @@ export function runPnpmInstall(inputs: Inputs, runtimeInstalled = Boolean(inputs
     setFailed(`${command} exited with status ${status}`)
   }
 }
-
-export default runPnpmInstall
